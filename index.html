@@ -1,0 +1,146 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tensegrity Pose Extractor — Prototype</title>
+<style>
+body{font-family:system-ui,Segoe UI,Helvetica,Arial;margin:8px}
+#canvas{border:1px solid #999;cursor:crosshair}
+.controls{margin-top:8px}
+.btn{padding:6px 10px;margin-right:6px}
+.point{width:8px;height:8px;border-radius:4px;background:#e33;position:absolute;transform:translate(-4px,-4px)}
+</style>
+</head>
+<body>
+<h3>Tensegrity Pose Extractor (prototype)</h3>
+<p>I am Marmalade. This page lets you digitize a 2D plot: load an image, click to add points along a curve, drag to refine, then export CSV/JSON normalized time-series.</p>
+<input type="file" id="file" accept="image/*">
+<br>
+<canvas id="canvas" width="800" height="400"></canvas>
+<div class="controls">
+<button id="clear" class="btn">Clear Points</button>
+<button id="exportCSV" class="btn">Export CSV</button>
+<button id="exportJSON" class="btn">Export JSON</button>
+<label>Samples <input id="samples" type="number" value="100" min="2" style="width:70px"></label>
+</div>
+<pre id="log" style="max-height:200px;overflow:auto;background:#f7f7f7;padding:8px"></pre>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let img = null;
+let points = [];
+let dragIdx = -1;
+const log = m=>{document.getElementById('log').textContent = m};
+
+// load image
+document.getElementById('file').addEventListener('change', e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const url = URL.createObjectURL(f);
+  img = new Image();
+  img.onload = ()=>{ draw(); URL.revokeObjectURL(url); };
+  img.src = url;
+});
+
+canvas.addEventListener('mousedown', e=>{
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  // select nearest if close
+  let nearest = -1; let nd = 12;
+  points.forEach((p,i)=>{ const d = Math.hypot(p.x-x,p.y-y); if(d<nd){ nd=d; nearest=i; }});
+  if(nearest>=0){ dragIdx = nearest; }
+  else{ points.push({x,y}); sortPoints(); draw(); }
+});
+canvas.addEventListener('mousemove', e=>{
+  if(dragIdx<0) return;
+  const r = canvas.getBoundingClientRect();
+  points[dragIdx].x = e.clientX - r.left;
+  points[dragIdx].y = e.clientY - r.top;
+  draw();
+});
+canvas.addEventListener('mouseup', ()=>{ dragIdx = -1; });
+
+function sortPoints(){ points.sort((a,b)=>a.x-b.x); }
+
+function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(img) {
+    // fit image into canvas preserving aspect
+    const scale = Math.min(canvas.width/img.width, canvas.height/img.height);
+    const w = img.width*scale, h = img.height*scale;
+    ctx.drawImage(img,0,0,w,h);
+  } else {
+    ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
+  // curve
+  if(points.length){
+    ctx.strokeStyle='#e33'; ctx.lineWidth=2; ctx.beginPath();
+    points.forEach((p,i)=> i? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y));
+    ctx.stroke();
+    // points
+    points.forEach(p=>{ ctx.fillStyle='#e33'; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,Math.PI*2); ctx.fill(); });
+  }
+}
+
+document.getElementById('clear').addEventListener('click', ()=>{ points=[]; draw(); log('Cleared'); });
+
+function sampleTrace(n){ if(points.length<2) return [];
+  // resample by x uniformly between min and max
+  const minX = Math.min(...points.map(p=>p.x));
+  const maxX = Math.max(...points.map(p=>p.x));
+  const out = [];
+  for(let i=0;i<n;i++){
+    const x = minX + (maxX-minX)*i/(n-1);
+    // linear interp along polyline defined by sorted points
+    let y = null;
+    for(let j=0;j<points.length-1;j++){
+      const a=points[j], b=points[j+1];
+      if(a.x<=x && x<=b.x){
+        const t = (x-a.x)/(b.x-a.x||1);
+        y = a.y*(1-t)+b.y*t; break;
+      }
+    }
+    if(y===null){ // outside range, clamp
+      y = x<points[0].x? points[0].y : points[points.length-1].y;
+    }
+    out.push({x,y});
+  }
+  return out;
+}
+
+function normalize(samples){ if(!samples.length) return [];
+  const xs = samples.map(s=>s.x); const ys = samples.map(s=>s.y);
+  const minX=Math.min(...xs), maxX=Math.max(...xs);
+  const minY=Math.min(...ys), maxY=Math.max(...ys);
+  return samples.map((s,i)=>({t: i/(samples.length-1), x: (s.x-minX)/(maxX-minX||1), y: 1 - (s.y-minY)/(maxY-minY||1)}));
+}
+
+function exportAsCSV(data){ let rows=['t,x,y']; data.forEach(p=>rows.push(`${p.t.toFixed(6)},${p.x.toFixed(6)},${p.y.toFixed(6)}`));
+  return rows.join('\n'); }
+
+function exportAsJSON(data){ return JSON.stringify({module: 'trace0', samples: data}, null, 2); }
+
+function download(filename, text){ const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], {type:'text/plain'})); a.download = filename; a.click(); }
+
+document.getElementById('exportCSV').addEventListener('click', ()=>{
+  const n = Number(document.getElementById('samples').value) || 100;
+  const s = sampleTrace(n); if(!s.length){ log('Need at least 2 points'); return; }
+  const norm = normalize(s);
+  download('trace.csv', exportAsCSV(norm)); log('Exported CSV with '+norm.length+' samples');
+});
+
+document.getElementById('exportJSON').addEventListener('click', ()=>{
+  const n = Number(document.getElementById('samples').value) || 100;
+  const s = sampleTrace(n); if(!s.length){ log('Need at least 2 points'); return; }
+  const norm = normalize(s);
+  const json = exportAsJSON(norm);
+  download('trace.json', json);
+  // also show a tiny python loader snippet
+  log('Exported JSON. Python loader:\n\n'+
+      "import json\nwith open('trace.json') as f:\n  data = json.load(f)\n# data['samples'] is a list of {t,x,y} normalized to [0,1] in x and y\nprint(len(data['samples']))");
+});
+
+// initial draw
+draw();
+</script>
+</body>
+</html>
